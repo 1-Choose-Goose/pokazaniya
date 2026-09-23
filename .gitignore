@@ -1,0 +1,22 @@
+.venv/
+.idea/
+__pycache__/
+*.py[cod]
+
+# Local application data and temporary exports
+pokazaniya.db
+*.db-journal
+*.db-shm
+*.db-wal
+tmp/
+
+# Packaging and test artifacts
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# OS files
+.DS_Store
+Thumbs.db
