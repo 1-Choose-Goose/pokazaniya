@@ -1,0 +1,63 @@
+name: Release Windows
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-build.txt
+
+      - name: Verify tag matches application version
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $version = python -c "from version import APP_VERSION; print(APP_VERSION)"
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            throw "Tag ${{ github.ref_name }} does not match version.py ($version)"
+          }
+
+      - name: Run tests
+        run: python -m unittest discover -v
+
+      - name: Build Windows application
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .\build-release.ps1
+
+      - name: Package update
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path release -Force | Out-Null
+          Compress-Archive -Path dist\Pokazaniya\* -DestinationPath release\Pokazaniya-Windows-x64.zip -CompressionLevel Fastest
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Pokazaniya-Windows-x64
+          path: release/Pokazaniya-Windows-x64.zip
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'push'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" release\Pokazaniya-Windows-x64.zip --verify-tag --notes "Добавлено безопасное автоматическое обновление приложения с проверкой SHA-256, сохранением пользовательской базы и откатом при ошибке." --title "Мои показания ${{ github.ref_name }}"

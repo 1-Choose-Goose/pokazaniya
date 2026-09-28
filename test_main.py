@@ -4,13 +4,13 @@ import unittest
 import tkinter as tk
 from types import SimpleNamespace
 from tkinter import ttk
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from decimal import Decimal
 from pathlib import Path
 
 from main import (
-    App, Database, Entry, export_excel_workbook, number, suggested_reading, valid_date,
-    valid_payment_time,
+    App, Database, DuplicateEntry, Entry, center_window, export_excel_workbook, number,
+    suggested_reading, valid_date, valid_payment_time,
 )
 
 
@@ -46,6 +46,22 @@ class DatabaseTests(unittest.TestCase):
         self.assertTrue(self.db.get(entry_id).paid)
         self.db.delete(entry_id)
         self.assertIsNone(self.db.get(entry_id))
+
+    def test_only_one_gas_entry_is_allowed_per_month(self):
+        original = Entry("Газ", "22.09.2026", Decimal("256.32"), paid=True,
+                         payment_date="22.09.2026 21:16")
+        original.id = self.db.add(original)
+        with self.assertRaisesRegex(DuplicateEntry, "за этот месяц уже существует"):
+            self.db.add(Entry("Газ", "24.09.2026", Decimal("58.25")))
+        original.note = "исправлено"
+        self.db.update(original)
+        self.assertEqual(len(self.db.all("Газ")), 1)
+
+    def test_identical_non_gas_entry_is_rejected(self):
+        entry = Entry("ТКО", "24.09.2026", Decimal("100"))
+        self.db.add(entry)
+        with self.assertRaisesRegex(DuplicateEntry, "уже сохранена"):
+            self.db.add(entry)
 
     def test_legacy_import_is_idempotent(self):
         self.db.close()
@@ -201,6 +217,30 @@ class DatabaseTests(unittest.TestCase):
             records = self.db.all("Газ")
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0].amount, Decimal("58.25"))
+        finally:
+            app.destroy()
+
+    def test_successful_save_requests_one_cloud_upload(self):
+        app = App(self.db)
+        app.cloud = SimpleNamespace(saved=Mock())
+        try:
+            app.forms["Газ"].fields["amount"].set("58,25")
+            app.save_all()
+            app.cloud.saved.assert_called_once_with()
+            self.assertEqual(len(self.db.all("Газ")), 1)
+        finally:
+            app.destroy()
+
+    def test_invalid_save_does_not_request_cloud_upload(self):
+        app = App(self.db)
+        app.cloud = SimpleNamespace(saved=Mock())
+        try:
+            app.forms["Газ"].fields["period"].set("не дата")
+            app.forms["Газ"].fields["amount"].set("58,25")
+            with patch("main.messagebox.showerror"):
+                app.save_all()
+            app.cloud.saved.assert_not_called()
+            self.assertEqual(self.db.all("Газ"), [])
         finally:
             app.destroy()
 
@@ -367,7 +407,7 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(journal["K5"].value, 450.24)
         self.assertEqual(journal["M6"].value, "Не оплачено")
         self.assertEqual(book["Счётчики"]["C5"].value, "00111657")
-        self.assertEqual(book["Сводка"]["I26"].value, "=SUM(C26:H26)")
+        self.assertEqual(book["Сводка"]["J26"].value, "=SUM(C26:I26)")
         self.assertEqual(journal.freeze_panes, "C5")
 
     def test_icon_uses_prepared_sizes_instead_of_tk_subsampling(self):
@@ -375,6 +415,30 @@ class DatabaseTests(unittest.TestCase):
         try:
             self.assertEqual(app._small_icon.width(), 40)
             self.assertEqual([icon.width() for icon in app._icons], [16, 32, 48, 256])
+        finally:
+            app.destroy()
+
+    def test_main_and_custom_dialogs_are_centered(self):
+        app = App(self.db)
+        try:
+            app.update_idletasks()
+            self.assertLessEqual(abs(app.winfo_x() * 2 + app.winfo_width() - app.winfo_screenwidth()), 2)
+            self.assertLessEqual(abs(app.winfo_y() * 2 + app.winfo_height() - app.winfo_screenheight()), 2)
+            dialog = tk.Toplevel(app)
+            dialog.withdraw()
+            ttk.Label(dialog, text="Проверка центра", padding=20).pack()
+            center_window(dialog)
+            dialog.deiconify()
+            dialog.update_idletasks()
+            self.assertLessEqual(
+                abs(dialog.winfo_x() * 2 + dialog.winfo_width() - dialog.winfo_screenwidth()),
+                2,
+            )
+            self.assertLessEqual(
+                abs(dialog.winfo_y() * 2 + dialog.winfo_height() - dialog.winfo_screenheight()),
+                2,
+            )
+            dialog.destroy()
         finally:
             app.destroy()
 

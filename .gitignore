@@ -16,6 +16,8 @@ dist/
 *.egg-info/
 .pytest_cache/
 .coverage
+yandex-disk.json
+.yandex-sync/
 
 # OS files
 .DS_Store

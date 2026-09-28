@@ -14,13 +14,18 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+import updates
+from update_ui import UpdateControls
+from yandex_sync import CloudControls, prepare_database
 
 
-DB_PATH = Path(__file__).resolve().parent / "pokazaniya.db"
-ICON_PATH = Path(__file__).resolve().parent / "app_icon.png"
-ICON_ICO_PATH = Path(__file__).resolve().parent / "app_icon.ico"
+RESOURCE_DIR = Path(__file__).resolve().parent
+APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else RESOURCE_DIR
+DB_PATH = APP_DIR / "pokazaniya.db"
+ICON_PATH = RESOURCE_DIR / "app_icon.png"
+ICON_ICO_PATH = RESOURCE_DIR / "app_icon.ico"
 ICON_SIZES = (16, 32, 48, 256)
-SERVICES = ("Вода", "Отопление", "Электроэнергия", "Газ", "ТКО", "Домофон")
+SERVICES = ("Вода", "Отопление", "Электроэнергия", "Газ", "ТКО", "Домофон", "Домашний интернет")
 METERS = {"Вода": ("ХВС", "ГВС"), "Электроэнергия": ("День", "Ночь")}
 
 
@@ -204,7 +209,7 @@ def export_excel_workbook(path: Path, db: "Database") -> None:
     journal.print_options.horizontalCentered = True
     journal.sheet_properties.pageSetUpPr.fitToPage = True
 
-    setup(summary, "Сводка по месяцам", "Оплаченные суммы по услугам и неоплаченный остаток", [12, 17, 17, 17, 20, 17, 15, 17, 19, 19])
+    setup(summary, "Сводка по месяцам", "Оплаченные суммы по услугам и неоплаченный остаток", [12, 17, 17, 17, 20, 17, 15, 17, 25, 19, 19])
     header(summary, ("Год", "Месяц", *SERVICES, "Оплачено", "Не оплачено"))
     years = sorted({2025, date.today().year} | {
         datetime.strptime(item.period, "%d.%m.%Y").year for item in entries
@@ -225,41 +230,41 @@ def export_excel_workbook(path: Path, db: "Database") -> None:
     for year in years:
         first_month_row = row_index
         for month, name in enumerate(month_names, 1):
-            body_row(summary, row_index, 10)
+            body_row(summary, row_index, 11)
             summary.cell(row_index, 1, year)
             text_cell(summary.cell(row_index, 2), name)
-            for col in range(3, 9):
+            for col in range(3, 10):
                 letter = get_column_letter(col)
                 summary.cell(row_index, col, (
                     f'=SUMIFS({amount_range},{year_range},$A{row_index},'
                     f'{month_range},{month},{service_range},{letter}$4,'
                     f'{status_range},"Оплачено")'
                 ))
-            summary.cell(row_index, 9, f"=SUM(C{row_index}:H{row_index})")
-            summary.cell(row_index, 10, (
+            summary.cell(row_index, 10, f"=SUM(C{row_index}:I{row_index})")
+            summary.cell(row_index, 11, (
                 f'=SUMIFS({amount_range},{year_range},$A{row_index},'
                 f'{month_range},{month},{status_range},"Не оплачено")'
             ))
-            for col in range(3, 11):
+            for col in range(3, 12):
                 summary.cell(row_index, col).number_format = currency_format
             row_index += 1
-        body_row(summary, row_index, 10)
+        body_row(summary, row_index, 11)
         text_cell(summary.cell(row_index, 2), f"Итого {year}")
-        for col in range(3, 11):
+        for col in range(3, 12):
             letter = get_column_letter(col)
             summary.cell(row_index, col, f"=SUM({letter}{first_month_row}:{letter}{row_index - 1})")
             summary.cell(row_index, col).number_format = currency_format
-        for cell in summary[row_index][:10]:
+        for cell in summary[row_index][:11]:
             cell.fill = PatternFill("solid", fgColor=pale)
             cell.font = Font(name="Arial", size=10, bold=True, color=ink)
         year_total_rows.append(row_index)
         row_index += 1
     summary["H2"] = "Всего оплачено"
     summary["H2"].font = Font(name="Arial", size=10, bold=True, color=ink)
-    summary["I2"] = "=" + "+".join(f"I{row}" for row in year_total_rows)
-    summary["I2"].number_format = currency_format
-    summary["I2"].font = Font(name="Arial", size=12, bold=True, color=accent)
-    summary.auto_filter.ref = f"A4:J{row_index - 1}"
+    summary["J2"] = "=" + "+".join(f"J{row}" for row in year_total_rows)
+    summary["J2"].number_format = currency_format
+    summary["J2"].font = Font(name="Arial", size=12, bold=True, color=accent)
+    summary.auto_filter.ref = f"A4:K{row_index - 1}"
 
     setup(meters, "Счётчики", "Номера и даты из настроек программы", [25, 22, 26, 22])
     header(meters, ("Услуга", "Счётчик", "Номер", "Дата"))
@@ -436,6 +441,10 @@ class Entry:
         return None
 
 
+class DuplicateEntry(ValueError):
+    """A record that would duplicate an existing history row."""
+
+
 class Database:
     def __init__(self, path: Path = DB_PATH):
         self.connection = sqlite3.connect(path)
@@ -550,6 +559,7 @@ class Database:
         )
 
     def add(self, entry: Entry, *, commit: bool = True) -> int:
+        self._ensure_not_duplicate(entry)
         cursor = self.connection.execute(
             """INSERT INTO entries
             (service, period, amount, payment_date, paid, meter_1, meter_2, value_1, value_2, note)
@@ -563,6 +573,7 @@ class Database:
     def update(self, entry: Entry, *, commit: bool = True) -> None:
         if entry.id is None:
             raise ValueError("Не выбрана запись")
+        self._ensure_not_duplicate(entry, exclude_id=entry.id)
         self.connection.execute(
             """UPDATE entries SET service=?, period=?, amount=?, payment_date=?,
             paid=?, meter_1=?, meter_2=?, value_1=?, value_2=?, note=? WHERE id=?""",
@@ -570,6 +581,31 @@ class Database:
         )
         if commit:
             self.connection.commit()
+
+    def _ensure_not_duplicate(self, entry: Entry, *, exclude_id: int | None = None) -> None:
+        params: list[object] = [entry.service, entry.period[3:]]
+        query = "SELECT id FROM entries WHERE service=? AND substr(period, 4)=?"
+        if exclude_id is not None:
+            query += " AND id<>?"
+            params.append(exclude_id)
+        same_month = self.connection.execute(query + " LIMIT 1", params).fetchone()
+        if entry.service == "Газ" and same_month:
+            raise DuplicateEntry(
+                "Запись «Газ» за этот месяц уже существует. "
+                "Выберите её в истории и нажмите «Изменить»."
+            )
+
+        data = self._data(entry)
+        query = """SELECT id FROM entries WHERE
+            service IS ? AND period IS ? AND amount IS ? AND payment_date IS ? AND
+            paid IS ? AND meter_1 IS ? AND meter_2 IS ? AND value_1 IS ? AND
+            value_2 IS ? AND note IS ?"""
+        params = list(data)
+        if exclude_id is not None:
+            query += " AND id<>?"
+            params.append(exclude_id)
+        if self.connection.execute(query + " LIMIT 1", params).fetchone():
+            raise DuplicateEntry("Такая запись уже сохранена.")
 
     def delete(self, entry_id: int) -> None:
         self.connection.execute("DELETE FROM entries WHERE id=?", (entry_id,))
@@ -759,6 +795,8 @@ class ServicePage(ttk.Frame):
             return
         self.clear()
         self.app.refresh()
+        if self.app.cloud is not None:
+            self.app.cloud.saved()
 
     def clear(self) -> None:
         self.edit_id = None
@@ -911,6 +949,7 @@ class CompactForm(ttk.Frame):
         else:
             self.rowconfigure(3, minsize=28)
             amount_row, receipt_row, action_row = 4, 5, 6
+        self.rowconfigure(amount_row - 1, weight=1)
         self._field("amount", "Сумма, ₽", amount_row)
         self._payment_field(receipt_row)
         bottom = ttk.Frame(self, style="Card.TFrame")
@@ -1202,6 +1241,10 @@ class App(tk.Tk):
             except (AttributeError, OSError):
                 pass
         super().__init__()
+        # Build the complete interface while hidden so Tk never paints its small
+        # default window before the final centered geometry is known.
+        self.withdraw()
+        center_window(self, 1080, 850)
         self._icons = [
             tk.PhotoImage(file=str(ICON_PATH.with_name(f"app_icon_{size}.png")))
             for size in ICON_SIZES
@@ -1211,6 +1254,13 @@ class App(tk.Tk):
             self.iconphoto(True, *self._icons)
         if sys.platform == "win32" and ICON_ICO_PATH.exists():
             self.iconbitmap(str(ICON_ICO_PATH))
+        self.cloud = None
+        self.update_controls = None
+        self._preparing_update = False
+        self._saving = False
+        if db is None and not prepare_database(self, DB_PATH):
+            self.destroy()
+            raise SystemExit(0)
         self.db = db or Database()
         self.title("Мои показания")
         self.geometry("1080x850")
@@ -1273,18 +1323,22 @@ class App(tk.Tk):
         ttk.Label(title_row, text="Мои показания",
                   font=("Segoe UI", 17, "bold"),
                   foreground="#263b33").pack(side="left")
+        self.update_controls = UpdateControls(self, title_row)
+        if db is None:
+            self.cloud = CloudControls(self, title_row, DB_PATH)
         forms = ttk.Frame(root)
         forms.pack(fill="x")
-        for column in range(4):
+        for column in range(12):
             forms.columnconfigure(column, weight=1, uniform="services")
         self.forms: dict[str, CompactForm] = {}
         layout = {
-            "Вода": (0, 0, 2),
-            "Электроэнергия": (0, 2, 2),
-            "Отопление": (1, 0, 1),
-            "Газ": (1, 1, 1),
-            "ТКО": (1, 2, 1),
-            "Домофон": (1, 3, 1),
+            "Вода": (0, 0, 4),
+            "Электроэнергия": (0, 4, 4),
+            "Отопление": (1, 0, 3),
+            "Газ": (1, 3, 3),
+            "ТКО": (1, 6, 3),
+            "Домофон": (1, 9, 3),
+            "Домашний интернет": (0, 8, 4),
         }
         for service in SERVICES:
             row, column, span = layout[service]
@@ -1368,10 +1422,11 @@ class App(tk.Tk):
         ttk.Button(footer, text="Экспорт Excel", command=self.export_excel).pack(
             side="right", padx=(0, 6)
         )
-        ttk.Button(
+        self.save_button = ttk.Button(
             footer, text="Сохранить", command=self.save_all,
             style="Primary.TButton",
-        ).pack(side="right", padx=(0, 8))
+        )
+        self.save_button.pack(side="right", padx=(0, 8))
         ttk.Button(
             footer, text="Очистить", command=self.clear_all,
         ).pack(side="right", padx=(0, 6))
@@ -1382,6 +1437,7 @@ class App(tk.Tk):
             self.winfo_screenheight() - 70,
         )
         center_window(self, 1080, target_height)
+        self.deiconify()
 
     def _bind_shortcuts(self) -> None:
         self.bind_class("UtilityHotkeys", "<KeyPress>", self._route_hotkey)
@@ -1428,7 +1484,7 @@ class App(tk.Tk):
         control = bool(event.state & 0x4)
         if self.tk.call("tk", "windowingsystem") == "win32":
             physical_keys = {
-                49: "1", 50: "2", 51: "3", 52: "4", 53: "5", 54: "6",
+                49: "1", 50: "2", 51: "3", 52: "4", 53: "5", 54: "6", 55: "7",
                 65: "a", 67: "c", 69: "e", 70: "f", 77: "m",
                 83: "s", 86: "v", 88: "x",
                 13: "return", 37: "left", 39: "right",
@@ -1443,7 +1499,7 @@ class App(tk.Tk):
                     return "break"
             return None
         if control:
-            if key in "123456" and len(key) == 1:
+            if key in "1234567" and len(key) == 1:
                 self._focus_service(SERVICES[int(key) - 1])
             elif key in ("s", "return"):
                 self._save_active()
@@ -1539,6 +1595,7 @@ class App(tk.Tk):
 
     def edit_meter_settings(self) -> None:
         dialog = tk.Toplevel(self)
+        dialog.withdraw()
         if self._icons:
             dialog.iconphoto(False, *self._icons)
         if sys.platform == "win32" and ICON_ICO_PATH.exists():
@@ -1589,6 +1646,8 @@ class App(tk.Tk):
             for key, variable in variables.items():
                 self.db.set_setting(key, variable.get(), commit=False)
             self.db.connection.commit()
+            if self.cloud is not None:
+                self.cloud.saved()
             for service in (*METERS, "Газ"):
                 self.forms[service].refresh_meter_labels()
             dialog.destroy()
@@ -1602,6 +1661,7 @@ class App(tk.Tk):
         dialog.bind("<Escape>", lambda _event: dialog.destroy())
         dialog.shortcut_save = save_numbers
         center_window(dialog)
+        dialog.deiconify()
         dialog.grab_set()
         dialog.focus_set()
 
@@ -1622,6 +1682,7 @@ class App(tk.Tk):
                 pass
         initial = initial or datetime.now()
         dialog = tk.Toplevel(self)
+        dialog.withdraw()
         if self._icons:
             dialog.iconphoto(False, *self._icons)
         if sys.platform == "win32" and ICON_ICO_PATH.exists():
@@ -1727,6 +1788,7 @@ class App(tk.Tk):
         dialog.shortcut_save = apply
         render_calendar()
         center_window(dialog)
+        dialog.deiconify()
         dialog.grab_set()
         dialog.focus_set()
 
@@ -1748,33 +1810,46 @@ class App(tk.Tk):
         self.save_all()
 
     def save_all(self) -> None:
-        prepared: list[tuple[CompactForm, Entry]] = []
-        for service in SERVICES:
-            form = self.forms[service]
-            if not form.has_data():
-                continue
-            try:
-                prepared.append((form, form._entry()))
-            except ValueError as exc:
-                form.focus_field()
-                messagebox.showerror(service, str(exc), parent=self)
-                return
-        if not prepared:
-            messagebox.showinfo("Сохранение", "Заполните хотя бы один раздел.", parent=self)
+        if self._saving:
             return
+        self._saving = True
+        self.save_button.state(["disabled"])
         try:
-            with self.db.connection:
-                for _form, entry in prepared:
-                    if entry.id is None:
-                        self.db.add(entry, commit=False)
-                    else:
-                        self.db.update(entry, commit=False)
-        except sqlite3.Error as exc:
-            messagebox.showerror("Сохранение", str(exc), parent=self)
-            return
-        for form, _entry in prepared:
-            form.clear()
-        self.refresh()
+            prepared: list[tuple[CompactForm, Entry]] = []
+            for service in SERVICES:
+                form = self.forms[service]
+                if not form.has_data():
+                    continue
+                try:
+                    prepared.append((form, form._entry()))
+                except ValueError as exc:
+                    form.focus_field()
+                    messagebox.showerror(service, str(exc), parent=self)
+                    return
+            if not prepared:
+                messagebox.showinfo("Сохранение", "Заполните хотя бы один раздел.", parent=self)
+                return
+            try:
+                with self.db.connection:
+                    for _form, entry in prepared:
+                        if entry.id is None:
+                            self.db.add(entry, commit=False)
+                        else:
+                            self.db.update(entry, commit=False)
+            except DuplicateEntry as exc:
+                messagebox.showinfo("Запись уже существует", str(exc), parent=self)
+                return
+            except sqlite3.Error as exc:
+                messagebox.showerror("Сохранение", str(exc), parent=self)
+                return
+            for form, _entry in prepared:
+                form.clear()
+            self.refresh()
+            if self.cloud is not None:
+                self.cloud.saved()
+        finally:
+            self._saving = False
+            self.save_button.state(["!disabled"])
 
     def _clear_active(self) -> None:
         self._active_form().clear()
@@ -2092,9 +2167,38 @@ class App(tk.Tk):
             messagebox.showinfo("Экспорт Excel", f"Сохранено: {path}", parent=self)
 
     def close(self) -> None:
+        if self.cloud is not None and not self.cloud.close():
+            return
+        if self.update_controls is not None:
+            self.update_controls.close()
+        self.db.close()
+        self.destroy()
+
+    def prepare_for_update(self) -> bool:
+        """Завершить облачную отправку перед передачей файлов обновлятору."""
+        if self._preparing_update:
+            return True
+        if self.cloud is not None and not self.cloud.close():
+            return False
+        self.cloud = None
+        self._preparing_update = True
+        return True
+
+    def finish_for_update(self) -> None:
+        if self.update_controls is not None:
+            self.update_controls.close()
         self.db.close()
         self.destroy()
 
 
 if __name__ == "__main__":
+    if updates.is_update_in_progress():
+        if sys.platform == "win32":
+            ctypes.windll.user32.MessageBoxW(
+                None,
+                "Установка новой версии ещё не завершена. Подождите немного.",
+                "Мои показания обновляются",
+                0x40,
+            )
+        raise SystemExit(0)
     App().mainloop()
