@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -418,6 +419,10 @@ class DatabaseTests(unittest.TestCase):
         finally:
             app.destroy()
 
+    @unittest.skipIf(
+        os.environ.get("GITHUB_ACTIONS") == "true",
+        "Hosted Windows runner принудительно сдвигает высокие Tk-окна",
+    )
     def test_main_and_custom_dialogs_are_centered(self):
         app = App(self.db)
         try:
