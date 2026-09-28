@@ -11,8 +11,9 @@ from pathlib import Path
 
 from main import (
     App, Database, DuplicateEntry, Entry, center_window, export_excel_workbook, number,
-    suggested_reading, valid_date, valid_payment_time,
+    prepare_database_location, suggested_reading, valid_date, valid_payment_time,
 )
+from yandex_sync import SyncEngine
 
 
 class DatabaseTests(unittest.TestCase):
@@ -231,6 +232,64 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(len(self.db.all("Газ")), 1)
         finally:
             app.destroy()
+
+    def test_save_button_uploads_the_changed_database(self):
+        class RecordingDisk:
+            data = None
+
+            def metadata(self):
+                if self.data is None:
+                    return None
+                import hashlib
+                return {"sha256": hashlib.sha256(self.data).hexdigest()}
+
+            def upload(self, path):
+                self.data = path.read_bytes()
+                return self.metadata()
+
+        disk = RecordingDisk()
+        engine = SyncEngine(
+            self.path,
+            Path(self.temp.name) / "sync-state",
+            lambda: disk,
+        )
+        engine.start()
+        app = App(self.db)
+        app.cloud = SimpleNamespace(saved=engine.request_sync)
+        try:
+            app.forms["Газ"].fields["amount"].set("58,25")
+            app.save_all()
+            self.assertTrue(engine.idle.wait(3))
+            self.assertIsNotNone(disk.data)
+            downloaded = Path(self.temp.name) / "uploaded.db"
+            downloaded.write_bytes(disk.data)
+            remote = Database(downloaded)
+            try:
+                self.assertEqual(len(remote.all("Газ")), 1)
+                self.assertEqual(remote.all("Газ")[0].amount, Decimal("58.25"))
+            finally:
+                remote.close()
+        finally:
+            engine.stop()
+            app.destroy()
+
+    def test_legacy_database_is_moved_into_data_folder(self):
+        root = Path(self.temp.name) / "portable-app"
+        root.mkdir()
+        legacy = root / "pokazaniya.db"
+        target = root / "data" / "pokazaniya.db"
+        old = Database(legacy)
+        old.add(Entry("Газ", "01.09.2026", Decimal("58.25")))
+        old.close()
+
+        self.assertEqual(prepare_database_location(target, legacy), target)
+
+        self.assertFalse(legacy.exists())
+        migrated = Database(target)
+        try:
+            self.assertEqual(len(migrated.all("Газ")), 1)
+        finally:
+            migrated.close()
 
     def test_invalid_save_does_not_request_cloud_upload(self):
         app = App(self.db)

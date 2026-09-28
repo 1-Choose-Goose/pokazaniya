@@ -1,4 +1,5 @@
 import hashlib
+import io
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -7,7 +8,9 @@ import unittest
 from unittest.mock import patch
 
 from main import Database, Entry
-from yandex_sync import Conflict, SyncEngine, digest, load_token, save_token, snapshot, validate
+from yandex_sync import (
+    Conflict, DiskAPI, SyncEngine, digest, load_token, save_token, snapshot, validate,
+)
 
 
 class FakeDisk:
@@ -27,9 +30,11 @@ class FakeDisk:
         self.uploads += 1
         return self.metadata()
 
-    def download(self, path):
+    def download(self, path, progress=None):
         meta = self.metadata()
         path.write_bytes(self.data)
+        if progress:
+            progress(len(self.data), len(self.data))
         db = sqlite3.connect(path)
         try:
             validate(db)
@@ -143,6 +148,45 @@ class SyncTests(unittest.TestCase):
             save_token("test-token")
             self.assertEqual(load_token(), "test-token")
             self.assertIn("test-token", (self.root / "token.json").read_text())
+
+    def test_disk_download_streams_progress_and_replaces_atomically(self):
+        self.db.add(Entry("Газ", "01.09.2026", None))
+        content = (self.root / "data.db").read_bytes()
+        metadata = {
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size": len(content),
+        }
+
+        class Response(io.BytesIO):
+            headers = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_arguments):
+                self.close()
+
+        api = DiskAPI("token")
+        target = self.root / "downloaded.db"
+        progress = []
+        with (
+            patch.object(api, "metadata", return_value=metadata),
+            patch.object(
+                api,
+                "request",
+                return_value={"href": "https://downloader.yandex.net/file"},
+            ),
+            patch("yandex_sync.urllib.request.urlopen", return_value=Response(content)),
+        ):
+            _local_hash, returned_meta = api.download(
+                target,
+                progress=lambda downloaded, total: progress.append((downloaded, total)),
+            )
+
+        self.assertEqual(returned_meta, metadata)
+        self.assertEqual(target.read_bytes(), content)
+        self.assertFalse(target.with_suffix(".db.part").exists())
+        self.assertEqual(progress[-1], (len(content), len(content)))
 
     def test_background_worker_uploads_only_after_save_request(self):
         self.engine.start()

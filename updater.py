@@ -17,7 +17,6 @@ from collections.abc import Callable
 from pathlib import Path
 
 
-PRESERVED_ITEMS = ("pokazaniya.db", "yandex-disk.json", ".yandex-sync")
 ProgressCallback = Callable[[int, str], None]
 
 
@@ -207,14 +206,14 @@ def _payload_root(staging: Path, executable: str) -> Path:
     raise ApplyUpdateError("В архиве нет новой версии Pokazaniya.exe")
 
 
-def _move_preserved_items(backup: Path, installed: Path) -> None:
-    for name in PRESERVED_ITEMS:
-        source = backup / name
+def _move_preserved_items(backup: Path, installed: Path) -> list[str]:
+    """Вернуть пользовательские данные и посторонние файлы в новую установку."""
+    moved = []
+    for source in backup.iterdir():
+        name = source.name
         destination = installed / name
-        if not source.exists():
-            continue
         if destination.exists():
-            if name in {"pokazaniya.db", ".yandex-sync"}:
+            if name in {"data", "pokazaniya.db", ".yandex-sync"}:
                 if destination.is_dir():
                     shutil.rmtree(destination)
                 else:
@@ -222,6 +221,8 @@ def _move_preserved_items(backup: Path, installed: Path) -> None:
             else:
                 continue
         shutil.move(str(source), str(destination))
+        moved.append(name)
+    return moved
 
 
 def apply_update(
@@ -239,7 +240,6 @@ def apply_update(
         raise ApplyUpdateError("Архив обновления повреждён")
     if (
         not install_dir.is_dir()
-        or install_dir.name.casefold() != "pokazaniya"
         or not (install_dir / executable).is_file()
         or not (install_dir / "_internal" / "PokazaniyaUpdater.exe").is_file()
         or not (install_dir / "_internal").is_dir()
@@ -254,6 +254,7 @@ def apply_update(
     staging = install_dir.parent / f".Pokazaniya-update-{suffix}"
     backup = install_dir.parent / f".Pokazaniya-backup-{suffix}"
     failed_install: Path | None = None
+    moved_items: list[str] = []
     try:
         staging.mkdir()
         report(20, "Распаковываем новую версию…")
@@ -267,14 +268,14 @@ def apply_update(
         try:
             payload.rename(install_dir)
             report(78, "Сохраняем показания и настройки…")
-            _move_preserved_items(backup, install_dir)
+            moved_items = _move_preserved_items(backup, install_dir)
             if restart:
                 subprocess.Popen(
                     [str(install_dir / executable)], close_fds=True, cwd=install_dir
                 )
         except Exception:
             if install_dir.exists():
-                for name in PRESERVED_ITEMS:
+                for name in moved_items:
                     source = install_dir / name
                     destination = backup / name
                     if source.exists() and not destination.exists():

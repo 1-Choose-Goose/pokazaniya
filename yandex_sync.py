@@ -165,22 +165,39 @@ class DiskAPI:
             raise ValueError("Не удалось подтвердить целостность загруженной базы. Повторим проверку.")
         return meta
 
-    def download(self, path):
+    def download(self, path, progress=None):
         meta = self.metadata()
         if not meta:
             raise ValueError("На Диске пока нет базы.")
         link = self.request("resources/download", path=REMOTE)
-        with urllib.request.urlopen(self.transfer_url(link["href"]), timeout=45) as response:
-            data = response.read()
-        if meta.get("sha256") != hashlib.sha256(data).hexdigest():
-            raise ValueError("Файл изменился во время скачивания. Повторите восстановление.")
-        path.write_bytes(data)
-        connection = sqlite3.connect(path)
+        temporary = path.with_suffix(path.suffix + ".part")
+        downloaded = 0
+        checksum = hashlib.sha256()
         try:
-            validate(connection)
-            local_hash = digest(connection)
-        finally:
-            connection.close()
+            with urllib.request.urlopen(
+                self.transfer_url(link["href"]), timeout=45
+            ) as response, temporary.open("wb") as output:
+                total = int(meta.get("size") or response.headers.get("Content-Length") or 0)
+                while block := response.read(1024 * 1024):
+                    output.write(block)
+                    checksum.update(block)
+                    downloaded += len(block)
+                    if progress:
+                        progress(downloaded, total)
+            if meta.get("sha256") != checksum.hexdigest():
+                raise ValueError(
+                    "Файл изменился во время скачивания. Повторите восстановление."
+                )
+            connection = sqlite3.connect(temporary)
+            try:
+                validate(connection)
+                local_hash = digest(connection)
+            finally:
+                connection.close()
+            temporary.replace(path)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
         return local_hash, meta
 
 
@@ -294,26 +311,56 @@ class SyncEngine:
             raise ValueError("Яндекс Диск не завершил отправку за 75 секунд.")
 
 
-def background(parent, title, action):
+def background(parent, title, action, *, show_progress=False):
     """Modal progress with an active Tk event loop; network never runs on UI thread."""
     dialog = tk.Toplevel(parent)
     dialog.withdraw()
     dialog.title(title)
     dialog.transient(parent)
     dialog.protocol("WM_DELETE_WINDOW", lambda: None)
-    ttk.Label(dialog, text=title + "…", padding=25).pack()
+    content = ttk.Frame(dialog, padding=22)
+    content.pack(fill="both", expand=True)
+    status = tk.StringVar(value=title + "…")
+    ttk.Label(content, textvariable=status).pack(anchor="w")
+    bar = ttk.Progressbar(content, maximum=100, length=360)
+    bar.pack(fill="x", pady=(12, 2))
+    if not show_progress:
+        bar.configure(mode="indeterminate")
+        bar.start(12)
     show_centered(dialog)
     result = queue.Queue()
+    events = queue.Queue()
+
+    def report(downloaded, total):
+        events.put((downloaded, total))
+
     def work():
         try:
-            result.put((True, action()))
+            result.put((True, action(report) if show_progress else action()))
         except Exception as exc:
             result.put((False, exc))
     threading.Thread(target=work, daemon=True).start()
     outcome = []
     def poll():
         try:
+            while True:
+                downloaded, total = events.get_nowait()
+                if total:
+                    percent = min(100, round(downloaded * 100 / total))
+                    bar.configure(mode="determinate", value=percent)
+                    status.set(
+                        f"{title}: {percent}%  "
+                        f"({downloaded / 1024 / 1024:.1f} из {total / 1024 / 1024:.1f} МБ)"
+                    )
+                else:
+                    bar.configure(mode="indeterminate")
+                    bar.start(12)
+                    status.set(f"{title}: {downloaded / 1024 / 1024:.1f} МБ")
+        except queue.Empty:
+            pass
+        try:
             outcome.extend(result.get_nowait())
+            bar.stop()
             dialog.destroy()
         except queue.Empty:
             dialog.after(100, poll)
@@ -358,6 +405,7 @@ def connect(parent):
 
 def prepare_database(parent, path: Path) -> bool:
     """Never silently create an empty DB when a database was lost or not transferred."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         return True
     while True:
@@ -380,7 +428,10 @@ def prepare_database(parent, path: Path) -> bool:
                 local_hash, meta = background(
                     parent,
                     "Скачивание базы",
-                    lambda target=target: DiskAPI(load_token()).download(target),
+                    lambda report, target=target: DiskAPI(load_token()).download(
+                        target, progress=report
+                    ),
+                    show_progress=True,
                 )
                 os.replace(target, path)
                 SyncEngine(path).record(local_hash, meta)
@@ -445,7 +496,14 @@ class CloudControls:
                 self.engine.stop()
                 with tempfile.TemporaryDirectory(prefix="pokazaniya-") as temp:
                     target = Path(temp) / "restore.db"
-                    local_hash, meta = background(dialog, "Скачивание базы", lambda: self.engine.api_factory().download(target))
+                    local_hash, meta = background(
+                        dialog,
+                        "Скачивание базы",
+                        lambda report: self.engine.api_factory().download(
+                            target, progress=report
+                        ),
+                        show_progress=True,
+                    )
                     source = sqlite3.connect(target)
                     try:
                         source.backup(self.app.db.connection)

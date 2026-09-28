@@ -245,11 +245,11 @@ def launch_updater(archive: Path) -> None:
         raise UpdateError("Автообновление доступно только в собранной Windows-версии")
     install_dir = Path(sys.executable).resolve().parent
     if (
-        install_dir.name.casefold() != "pokazaniya"
+        not (install_dir / "Pokazaniya.exe").is_file()
         or not (install_dir / "_internal").is_dir()
         or (install_dir / ".git").exists()
     ):
-        raise UpdateError("Папка установки программы не прошла проверку безопасности")
+        raise UpdateError("Не найдена установленная программа")
     source_updater = install_dir / UPDATER_RELATIVE_PATH
     if not source_updater.is_file():
         raise UpdateError("Рядом с программой не найден модуль обновления")

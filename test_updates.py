@@ -133,14 +133,15 @@ class ApplyUpdateTests(unittest.TestCase):
             package.writestr("_internal/PokazaniyaUpdater.exe", b"new updater")
             package.writestr("_internal/runtime.dll", b"new runtime")
 
-    def make_install(self, root: Path) -> Path:
-        install = root / "Pokazaniya"
+    def make_install(self, root: Path, name: str = "Pokazaniya") -> Path:
+        install = root / name
         (install / "_internal").mkdir(parents=True)
+        (install / "data").mkdir()
         (install / ".yandex-sync").mkdir()
         (install / "Pokazaniya.exe").write_bytes(b"old executable")
         (install / "_internal" / "PokazaniyaUpdater.exe").write_bytes(b"old updater")
         (install / "_internal" / "runtime.dll").write_bytes(b"old runtime")
-        (install / "pokazaniya.db").write_bytes(b"user readings")
+        (install / "data" / "pokazaniya.db").write_bytes(b"user readings")
         (install / "yandex-disk.json").write_text('{"token":"secret"}', encoding="utf-8")
         (install / ".yandex-sync" / "state.json").write_text("{}", encoding="utf-8")
         return install
@@ -160,11 +161,42 @@ class ApplyUpdateTests(unittest.TestCase):
             self.assertEqual(
                 (install / "_internal" / "runtime.dll").read_bytes(), b"new runtime"
             )
-            self.assertEqual((install / "pokazaniya.db").read_bytes(), b"user readings")
+            self.assertEqual(
+                (install / "data" / "pokazaniya.db").read_bytes(), b"user readings"
+            )
             self.assertTrue((install / "yandex-disk.json").is_file())
             self.assertTrue((install / ".yandex-sync" / "state.json").is_file())
             self.assertFalse(download.exists())
             self.assertFalse(list(root.glob(".Pokazaniya-*")))
+
+    def test_update_allows_a_dedicated_folder_with_any_name(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            install = self.make_install(root, "Новая папка (2)")
+            archive = root / "update.zip"
+            self.make_archive(archive)
+
+            updater.apply_update(archive, install, restart=False)
+
+            self.assertEqual((install / "Pokazaniya.exe").read_bytes(), b"new executable")
+            self.assertEqual(
+                (install / "data" / "pokazaniya.db").read_bytes(), b"user readings"
+            )
+
+    def test_update_preserves_unrelated_files_in_the_program_folder(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            install = self.make_install(root, "mixed-files")
+            (install / "unrelated-document.txt").write_text("keep", encoding="utf-8")
+            archive = root / "update.zip"
+            self.make_archive(archive)
+
+            updater.apply_update(archive, install, restart=False)
+
+            self.assertEqual(
+                (install / "unrelated-document.txt").read_text(encoding="utf-8"),
+                "keep",
+            )
 
     def test_archive_cannot_write_outside_staging_directory(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -187,7 +219,9 @@ class ApplyUpdateTests(unittest.TestCase):
             ), self.assertRaisesRegex(OSError, "cannot start"):
                 updater.apply_update(archive, install)
             self.assertEqual((install / "Pokazaniya.exe").read_bytes(), b"old executable")
-            self.assertEqual((install / "pokazaniya.db").read_bytes(), b"user readings")
+            self.assertEqual(
+                (install / "data" / "pokazaniya.db").read_bytes(), b"user readings"
+            )
             self.assertFalse(list(root.glob(".Pokazaniya-*")))
 
     def test_refuses_to_replace_a_source_checkout(self):

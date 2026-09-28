@@ -21,12 +21,25 @@ from yandex_sync import CloudControls, prepare_database
 
 RESOURCE_DIR = Path(__file__).resolve().parent
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else RESOURCE_DIR
-DB_PATH = APP_DIR / "pokazaniya.db"
+DATA_DIR = APP_DIR / "data"
+DB_PATH = DATA_DIR / "pokazaniya.db"
+LEGACY_DB_PATH = APP_DIR / "pokazaniya.db"
 ICON_PATH = RESOURCE_DIR / "app_icon.png"
 ICON_ICO_PATH = RESOURCE_DIR / "app_icon.ico"
 ICON_SIZES = (16, 32, 48, 256)
 SERVICES = ("Вода", "Отопление", "Электроэнергия", "Газ", "ТКО", "Домофон", "Домашний интернет")
 METERS = {"Вода": ("ХВС", "ГВС"), "Электроэнергия": ("День", "Ночь")}
+
+
+def prepare_database_location(
+    target: Path = DB_PATH,
+    legacy: Path = LEGACY_DB_PATH,
+) -> Path:
+    """Создать data и перенести базу из старого расположения рядом с программой."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists() and legacy.is_file():
+        legacy.replace(target)
+    return target
 
 
 def valid_date(raw: str, *, required: bool = True) -> str:
@@ -1258,10 +1271,12 @@ class App(tk.Tk):
         self.update_controls = None
         self._preparing_update = False
         self._saving = False
-        if db is None and not prepare_database(self, DB_PATH):
-            self.destroy()
-            raise SystemExit(0)
-        self.db = db or Database()
+        if db is None:
+            prepare_database_location()
+            if not prepare_database(self, DB_PATH):
+                self.destroy()
+                raise SystemExit(0)
+        self.db = db or Database(DB_PATH)
         self.title("Мои показания")
         self.geometry("1080x850")
         self.minsize(1000, 810)

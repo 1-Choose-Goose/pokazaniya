@@ -60,4 +60,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" release\Pokazaniya-Windows-x64.zip --verify-tag --notes "Добавлено безопасное автоматическое обновление приложения с проверкой SHA-256, сохранением пользовательской базы и откатом при ошибке." --title "Мои показания ${{ github.ref_name }}"
+          gh release create "${{ github.ref_name }}" release\Pokazaniya-Windows-x64.zip --verify-tag --notes "База хранится в папке data рядом с программой; добавлен видимый прогресс восстановления с Яндекс Диска; исправлено обновление из папки с произвольным именем; подтверждена отправка изменённой базы после нажатия «Сохранить»." --title "Мои показания ${{ github.ref_name }}"
